@@ -1,0 +1,366 @@
+diff --git a/src/java/org/apache/cassandra/db/AbstractNativeCell.java b/src/java/org/apache/cassandra/db/AbstractNativeCell.java
+index e01d860..530cd46 100644
+--- a/src/java/org/apache/cassandra/db/AbstractNativeCell.java
++++ b/src/java/org/apache/cassandra/db/AbstractNativeCell.java
+@@ -303,7 +303,7 @@ public abstract class AbstractNativeCell extends AbstractCell implements CellNam
+         if (copy == null)
+             return getByteBuffer(cellNamesOffset + startDelta, length).order(ByteOrder.BIG_ENDIAN);
+         ByteBuffer result = copy.allocate(length);
+-        FastByteOperations.UnsafeOperations.copy(null, peer + cellNamesOffset + startDelta, result, 0, length);
++        FastByteOperations.UnsafeOperations.copyNativeSrc(peer + cellNamesOffset + startDelta, result, 0, length);
+         return result;
+     }
+ 
+@@ -681,9 +681,9 @@ public abstract class AbstractNativeCell extends AbstractCell implements CellNam
+         for (int i = 0 ; i < minSize ; i++)
+         {
+             int endDelta = i < size - 1 ? getShort(nameDeltaOffset(i + 1)) : valueStartOffset() - cellNamesOffset;
+-            long offset = peer + cellNamesOffset + startDelta;
++            long address = peer + cellNamesOffset + startDelta;
+             int length = endDelta - startDelta;
+-            int cmp = FastByteOperations.UnsafeOperations.compareTo(null, offset, length, that.get(i));
++            int cmp = FastByteOperations.UnsafeOperations.compareToNativeLeft(address, length, that.get(i));
+             if (cmp != 0)
+                 return cmp;
+             startDelta = endDelta;
+@@ -700,7 +700,7 @@ public abstract class AbstractNativeCell extends AbstractCell implements CellNam
+     {
+         assert size() == 1 && that.size() == 1;
+         int length = valueStartOffset() - nameDeltaOffset(1);
+-        long offset = peer + nameDeltaOffset(1);
+-        return FastByteOperations.UnsafeOperations.compareTo(null, offset, length, that.get(0));
++        long address = peer + nameDeltaOffset(1);
++        return FastByteOperations.UnsafeOperations.compareToNativeLeft(address, length, that.get(0));
+     }
+ }
+diff --git a/src/java/org/apache/cassandra/io/util/Memory.java b/src/java/org/apache/cassandra/io/util/Memory.java
+index 5306433..816a125 100644
+--- a/src/java/org/apache/cassandra/io/util/Memory.java
++++ b/src/java/org/apache/cassandra/io/util/Memory.java
+@@ -20,7 +20,6 @@ package org.apache.cassandra.io.util;
+ import java.nio.ByteBuffer;
+ import java.nio.ByteOrder;
+ 
+-import com.sun.jna.Native;
+ import org.apache.cassandra.config.DatabaseDescriptor;
+ import org.apache.cassandra.utils.FastByteOperations;
+ import org.apache.cassandra.utils.memory.MemoryUtil;
+@@ -274,7 +273,7 @@ public class Memory
+         long end = memoryOffset + count;
+         checkPosition(end - 1);
+ 
+-        FastByteOperations.UnsafeOperations.copy(null, peer + memoryOffset, buffer, bufferOffset, count);
++        FastByteOperations.UnsafeOperations.copyNativeSrc(peer + memoryOffset, buffer, bufferOffset, count);
+     }
+ 
+     private void checkPosition(long offset)
+diff --git a/src/java/org/apache/cassandra/utils/FastByteOperations.java b/src/java/org/apache/cassandra/utils/FastByteOperations.java
+index 6e25492..f7945b8 100644
+--- a/src/java/org/apache/cassandra/utils/FastByteOperations.java
++++ b/src/java/org/apache/cassandra/utils/FastByteOperations.java
+@@ -190,26 +190,19 @@ public class FastByteOperations
+ 
+         public int compare(ByteBuffer buffer1, byte[] buffer2, int offset2, int length2)
+         {
+-            Object obj1;
+-            long offset1;
++            int position = buffer1.position();
++            int limit = buffer1.limit();
++            int length1 = limit - position;
+             if (buffer1.hasArray())
+             {
+-                obj1 = buffer1.array();
+-                offset1 = BYTE_ARRAY_BASE_OFFSET + buffer1.arrayOffset();
++                long offset1 = BYTE_ARRAY_BASE_OFFSET + buffer1.arrayOffset() + position;
++                return compareTo(buffer1.array(), offset1, length1, buffer2, BYTE_ARRAY_BASE_OFFSET + offset2, length2);
+             }
+             else
+             {
+-                obj1 = null;
+-                offset1 = theUnsafe.getLong(buffer1, DIRECT_BUFFER_ADDRESS_OFFSET);
++                long address1 = theUnsafe.getLong(buffer1, DIRECT_BUFFER_ADDRESS_OFFSET) + position;
++                return compareToNativeLeft(address1, length1, buffer2, BYTE_ARRAY_BASE_OFFSET + offset2, length2);
+             }
+-            int length1;
+-            {
+-                int position = buffer1.position();
+-                int limit = buffer1.limit();
+-                length1 = limit - position;
+-                offset1 += position;
+-            }
+-            return compareTo(obj1, offset1, length1, buffer2, BYTE_ARRAY_BASE_OFFSET + offset2, length2);
+         }
+ 
+         public int compare(ByteBuffer buffer1, ByteBuffer buffer2)
+@@ -222,36 +215,41 @@ public class FastByteOperations
+             if (src.hasArray())
+                 System.arraycopy(src.array(), src.arrayOffset() + srcPosition, trg, trgPosition, length);
+             else
+-                copy(null, srcPosition + theUnsafe.getLong(src, DIRECT_BUFFER_ADDRESS_OFFSET), trg, trgPosition, length);
++                copyNativeSrc(theUnsafe.getLong(src, DIRECT_BUFFER_ADDRESS_OFFSET) + srcPosition, trg, trgPosition, length);
+         }
+ 
+         public void copy(ByteBuffer srcBuf, int srcPosition, ByteBuffer trgBuf, int trgPosition, int length)
+         {
+-            Object src;
+-            long srcOffset;
+             if (srcBuf.hasArray())
+             {
+-                src = srcBuf.array();
+-                srcOffset = BYTE_ARRAY_BASE_OFFSET + srcBuf.arrayOffset();
++                copy(srcBuf.array(), BYTE_ARRAY_BASE_OFFSET + srcBuf.arrayOffset() + srcPosition, trgBuf, trgPosition, length);
+             }
+             else
+             {
+-                src = null;
+-                srcOffset = theUnsafe.getLong(srcBuf, DIRECT_BUFFER_ADDRESS_OFFSET);
++                copyNativeSrc(theUnsafe.getLong(srcBuf, DIRECT_BUFFER_ADDRESS_OFFSET) + srcPosition, trgBuf, trgPosition, length);
+             }
+-            copy(src, srcOffset + srcPosition, trgBuf, trgPosition, length);
+         }
+ 
+         public static void copy(Object src, long srcOffset, ByteBuffer trgBuf, int trgPosition, int length)
+         {
++            assert src != null;
+             if (trgBuf.hasArray())
+                 copy(src, srcOffset, trgBuf.array(), trgBuf.arrayOffset() + trgPosition, length);
+             else
+                 copy(src, srcOffset, null, trgPosition + theUnsafe.getLong(trgBuf, DIRECT_BUFFER_ADDRESS_OFFSET), length);
+         }
+ 
++        public static void copyNativeSrc(long srcAddress, ByteBuffer trgBuf, int trgPosition, int length)
++        {
++            if (trgBuf.hasArray())
++                copyNativeSrc(srcAddress, trgBuf.array(), trgBuf.arrayOffset() + trgPosition, length);
++            else
++                copy(null, srcAddress, null, trgPosition + theUnsafe.getLong(trgBuf, DIRECT_BUFFER_ADDRESS_OFFSET), length);
++        }
++
+         public static void copy(Object src, long srcOffset, byte[] trg, int trgPosition, int length)
+         {
++            assert src != null;
+             if (length <= MIN_COPY_THRESHOLD)
+             {
+                 for (int i = 0 ; i < length ; i++)
+@@ -263,6 +261,19 @@ public class FastByteOperations
+             }
+         }
+ 
++        public static void copyNativeSrc(long srcAddress, byte[] trg, int trgPosition, int length)
++        {
++            if (length <= MIN_COPY_THRESHOLD)
++            {
++                for (int i = 0 ; i < length ; i++)
++                    trg[trgPosition + i] = theUnsafe.getByte(srcAddress + i);
++            }
++            else
++            {
++                copy(null, srcAddress, trg, BYTE_ARRAY_BASE_OFFSET + trgPosition, length);
++            }
++        }
++
+         // 1M, copied from java.nio.Bits (unfortunately a package-private class)
+         private static final long UNSAFE_COPY_THRESHOLD = 1 << 20;
+         private static final long MIN_COPY_THRESHOLD = 6;
+@@ -282,55 +293,64 @@ public class FastByteOperations
+         @Inline
+         public static int compareTo(ByteBuffer buffer1, ByteBuffer buffer2)
+         {
+-            Object obj1;
+-            long offset1;
+-            int length1;
++            int length1 = buffer1.remaining();
+             if (buffer1.hasArray())
+             {
+-                obj1 = buffer1.array();
+-                offset1 = BYTE_ARRAY_BASE_OFFSET + buffer1.arrayOffset();
++                long offset1 = BYTE_ARRAY_BASE_OFFSET + buffer1.arrayOffset() + buffer1.position();
++                return compareTo(buffer1.array(), offset1, length1, buffer2);
+             }
+             else
+             {
+-                obj1 = null;
+-                offset1 = theUnsafe.getLong(buffer1, DIRECT_BUFFER_ADDRESS_OFFSET);
++                long address1 = theUnsafe.getLong(buffer1, DIRECT_BUFFER_ADDRESS_OFFSET) + buffer1.position();
++                return compareToNativeLeft(address1, length1, buffer2);
+             }
+-            offset1 += buffer1.position();
+-            length1 = buffer1.remaining();
+-            return compareTo(obj1, offset1, length1, buffer2);
+         }
+ 
+         @Inline
+         public static int compareTo(Object buffer1, long offset1, int length1, ByteBuffer buffer)
+         {
+-            Object obj2;
+-            long offset2;
+-
+             int position = buffer.position();
+             int limit = buffer.limit();
++            int length2 = limit - position;
+             if (buffer.hasArray())
+             {
+-                obj2 = buffer.array();
+-                offset2 = BYTE_ARRAY_BASE_OFFSET + buffer.arrayOffset();
++                long address = BYTE_ARRAY_BASE_OFFSET + buffer.arrayOffset() + position;
++                return compareTo(buffer1, offset1, length1, buffer.array(), address, length2);
+             }
+             else
+             {
+-                obj2 = null;
+-                offset2 = theUnsafe.getLong(buffer, DIRECT_BUFFER_ADDRESS_OFFSET);
++                long address = theUnsafe.getLong(buffer, DIRECT_BUFFER_ADDRESS_OFFSET) + position;
++                return -compareToNativeLeft(address, length2, buffer1, offset1, length1);
+             }
++        }
++
++        @Inline
++        public static int compareToNativeLeft(long address1, int length1, ByteBuffer buffer)
++        {
++            int position = buffer.position();
++            int limit = buffer.limit();
+             int length2 = limit - position;
+-            offset2 += position;
++            if (buffer.hasArray())
++            {
++                long offset2 = BYTE_ARRAY_BASE_OFFSET + buffer.arrayOffset() + position;
++                return compareToNativeLeft(address1, length1, buffer.array(), offset2, length2);
++            }
++            else
++            {
++                long address2 = theUnsafe.getLong(buffer, DIRECT_BUFFER_ADDRESS_OFFSET) + position;
++                return compareToNativeLeftAndRight(address1, length1, address2, length2);
++            }
+ 
+-            return compareTo(buffer1, offset1, length1, obj2, offset2, length2);
+         }
+ 
++
+         /**
+          * Lexicographically compare two arrays.
+          *
+-         * @param buffer1 left operand: a byte[] or null
+-         * @param buffer2 right operand: a byte[] or null
+-         * @param memoryOffset1 Where to start comparing in the left buffer (pure memory address if buffer1 is null, or relative otherwise)
+-         * @param memoryOffset2 Where to start comparing in the right buffer (pure memory address if buffer1 is null, or relative otherwise)
++         * @param buffer1 left operand: a byte[]
++         * @param buffer2 right operand: a byte[]
++         * @param memoryOffset1 Where to start comparing in the left buffer
++         * @param memoryOffset2 Where to start comparing in the right buffer
+          * @param length1 How much to compare from the left buffer
+          * @param length2 How much to compare from the right buffer
+          * @return 0 if equal, < 0 if left is less than right, etc.
+@@ -339,6 +359,8 @@ public class FastByteOperations
+         public static int compareTo(Object buffer1, long memoryOffset1, int length1,
+                              Object buffer2, long memoryOffset2, int length2)
+         {
++            assert buffer1 != null;
++            assert buffer2 != null;
+             int minLength = Math.min(length1, length2);
+ 
+             /*
+@@ -372,10 +394,103 @@ public class FastByteOperations
+             return length1 - length2;
+         }
+ 
++        /**
++         * Lexicographically compare two byte sequences.
++         *
++         * @param address1 Where to start comparing in the left buffer
++         * @param buffer2 right operand: a byte[]
++         * @param memoryOffset2 Where to start comparing in the right buffer
++         * @param length1 How much to compare from the left buffer
++         * @param length2 How much to compare from the right buffer
++         * @return 0 if equal, < 0 if left is less than right, etc.
++         */
++        @Inline
++        public static int compareToNativeLeft(long address1, int length1,
++                                              Object buffer2, long memoryOffset2, int length2)
++        {
++            assert buffer2 != null;
++            int minLength = Math.min(length1, length2);
++
++            /*
++             * Compare 8 bytes at a time. Benchmarking shows comparing 8 bytes at a
++             * time is no slower than comparing 4 bytes at a time even on 32-bit.
++             * On the other hand, it is substantially faster on 64-bit.
++             */
++            int wordComparisons = minLength & ~7;
++            for (int i = 0; i < wordComparisons ; i += Longs.BYTES)
++            {
++                long lw = theUnsafe.getLong(address1 + (long) i);
++                long rw = theUnsafe.getLong(buffer2, memoryOffset2 + (long) i);
++
++                if (lw != rw)
++                {
++                    if (BIG_ENDIAN)
++                        return UnsignedLongs.compare(lw, rw);
++
++                    return UnsignedLongs.compare(Long.reverseBytes(lw), Long.reverseBytes(rw));
++                }
++            }
++
++            for (int i = wordComparisons ; i < minLength ; i++)
++            {
++                int b1 = theUnsafe.getByte(address1 + i) & 0xFF;
++                int b2 = theUnsafe.getByte(buffer2, memoryOffset2 + i) & 0xFF;
++                if (b1 != b2)
++                    return b1 - b2;
++            }
++
++            return length1 - length2;
++        }
++
++        /**
++         * Lexicographically compare two byte sequences.
++         *
++         * @param address1 Where to start comparing in the left buffer
++         * @param address2 Where to start comparing in the right buffer
++         * @param length1 How much to compare from the left buffer
++         * @param length2 How much to compare from the right buffer
++         * @return 0 if equal, < 0 if left is less than right, etc.
++         */
++        @Inline
++        public static int compareToNativeLeftAndRight(long address1, int length1,
++                                                      long address2, int length2)
++        {
++            int minLength = Math.min(length1, length2);
++
++            /*
++             * Compare 8 bytes at a time. Benchmarking shows comparing 8 bytes at a
++             * time is no slower than comparing 4 bytes at a time even on 32-bit.
++             * On the other hand, it is substantially faster on 64-bit.
++             */
++            int wordComparisons = minLength & ~7;
++            for (int i = 0; i < wordComparisons ; i += Longs.BYTES)
++            {
++                long lw = theUnsafe.getLong(address1 + (long) i);
++                long rw = theUnsafe.getLong(address2 + (long) i);
++
++                if (lw != rw)
++                {
++                    if (BIG_ENDIAN)
++                        return UnsignedLongs.compare(lw, rw);
++
++                    return UnsignedLongs.compare(Long.reverseBytes(lw), Long.reverseBytes(rw));
++                }
++            }
++
++            for (int i = wordComparisons ; i < minLength ; i++)
++            {
++                int b1 = theUnsafe.getByte(address1 + i) & 0xFF;
++                int b2 = theUnsafe.getByte(address2 + i) & 0xFF;
++                if (b1 != b2)
++                    return b1 - b2;
++            }
++
++            return length1 - length2;
++        }
+     }
+ 
+     @SuppressWarnings("unused")
+-    public static final class PureJavaOperations implements ByteOperations
++    public static final class PureJavaOperations implements FastByteOperations.ByteOperations
+     {
+         @Override
+         public int compare(byte[] buffer1, int offset1, int length1,
