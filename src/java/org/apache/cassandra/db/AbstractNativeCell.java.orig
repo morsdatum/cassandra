@@ -303,7 +303,7 @@ public abstract class AbstractNativeCell extends AbstractCell implements CellNam
         if (copy == null)
             return getByteBuffer(cellNamesOffset + startDelta, length).order(ByteOrder.BIG_ENDIAN);
         ByteBuffer result = copy.allocate(length);
-        FastByteOperations.UnsafeOperations.copyNativeSrc(peer + cellNamesOffset + startDelta, result, 0, length);
+        FastByteOperations.UnsafeOperations.copy(null, peer + cellNamesOffset + startDelta, result, 0, length);
         return result;
     }
 
@@ -681,9 +681,9 @@ public abstract class AbstractNativeCell extends AbstractCell implements CellNam
         for (int i = 0 ; i < minSize ; i++)
         {
             int endDelta = i < size - 1 ? getShort(nameDeltaOffset(i + 1)) : valueStartOffset() - cellNamesOffset;
-            long address = peer + cellNamesOffset + startDelta;
+            long offset = peer + cellNamesOffset + startDelta;
             int length = endDelta - startDelta;
-            int cmp = FastByteOperations.UnsafeOperations.compareToNativeLeft(address, length, that.get(i));
+            int cmp = FastByteOperations.UnsafeOperations.compareTo(null, offset, length, that.get(i));
             if (cmp != 0)
                 return cmp;
             startDelta = endDelta;
@@ -700,7 +700,7 @@ public abstract class AbstractNativeCell extends AbstractCell implements CellNam
     {
         assert size() == 1 && that.size() == 1;
         int length = valueStartOffset() - nameDeltaOffset(1);
-        long address = peer + nameDeltaOffset(1);
-        return FastByteOperations.UnsafeOperations.compareToNativeLeft(address, length, that.get(0));
+        long offset = peer + nameDeltaOffset(1);
+        return FastByteOperations.UnsafeOperations.compareTo(null, offset, length, that.get(0));
     }
 }
